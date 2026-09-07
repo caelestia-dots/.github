@@ -1,0 +1,141 @@
+name: Reusable PR approval check
+
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check-pr-approvals:
+    name: check-pr-approvals
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check required writer approvals
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let rows = [];
+            let failure = null;
+
+            function hasWrite(permission) {
+              return ['write', 'maintain', 'admin'].includes(permission);
+            }
+
+            async function getPermission(login) {
+              try {
+                const { data } = await github.request(
+                  'GET /repos/{owner}/{repo}/collaborators/{username}/permission',
+                  { ...context.repo, username: login },
+                );
+
+                return data.permission;
+              } catch (error) {
+                if (error.status === 404) {
+                  return 'none';
+                }
+
+                throw error;
+              }
+            }
+
+            try {
+              if (!context.payload.pull_request) {
+                throw new Error(`No pull request found in ${context.eventName} payload.`);
+              }
+
+              const pullNumber = context.payload.pull_request.number;
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: pullNumber,
+              });
+              const authorLogin = pr.user.login;
+              const authorPermission = await getPermission(authorLogin);
+              const requiredApprovals = hasWrite(authorPermission) ? 1 : 2;
+              const reviews = await github.paginate(
+                github.rest.pulls.listReviews,
+                { ...context.repo, pull_number: pullNumber, per_page: 100 },
+              );
+              const latestDecisive = new Map();
+
+              for (const review of reviews) {
+                const login = review.user?.login;
+                const normalizedLogin = login?.toLowerCase();
+                const state = review.state?.toUpperCase();
+
+                if (!login || normalizedLogin === authorLogin.toLowerCase()) {
+                  continue;
+                }
+
+                if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) {
+                  continue;
+                }
+
+                const previous = latestDecisive.get(normalizedLogin);
+                const submitted = Date.parse(review.submitted_at || '') || 0;
+                const previousSubmitted = Date.parse(previous?.submitted_at || '') || 0;
+
+                if (
+                  !previous
+                    || submitted > previousSubmitted
+                    || (submitted === previousSubmitted && review.id > previous.id)
+                ) {
+                  latestDecisive.set(normalizedLogin, review);
+                }
+              }
+
+              const approvals = [];
+
+              for (const review of latestDecisive.values()) {
+                if (review.state?.toUpperCase() !== 'APPROVED') {
+                  continue;
+                }
+
+                if (review.commit_id !== pr.head.sha) {
+                  continue;
+                }
+
+                const permission = await getPermission(review.user.login);
+
+                if (hasWrite(permission)) {
+                  approvals.push(review.user.login);
+                }
+              }
+
+              approvals.sort((a, b) => a.localeCompare(b));
+              rows = [
+                ['Author', authorLogin],
+                ['Author permission', authorPermission],
+                ['Required writer approvals', String(requiredApprovals)],
+                ['Current writer approvals', String(approvals.length)],
+                ['Eligible reviewers', approvals.join(', ') || 'None'],
+                ['Current head', pr.head.sha],
+              ];
+
+              if (approvals.length < requiredApprovals) {
+                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
+              }
+            } catch (error) {
+              failure = `Approval-policy API or configuration error: ${error.message}`;
+              rows = [['Result', failure]];
+            }
+
+            try {
+              await core.summary
+                .addHeading('Review policy')
+                .addTable([
+                  [
+                    { data: 'Property', header: true },
+                    { data: 'Value', header: true },
+                  ],
+                  ...rows,
+                ])
+                .write();
+            } catch (error) {
+              failure ||= `Could not write the required review summary: ${error.message}`;
+            }
+
+            if (failure) {
+              core.setFailed(failure);
+            }
