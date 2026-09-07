@@ -40,16 +40,34 @@ jobs:
               }
             }
 
+            function assertHeadUnchanged(expectedHead, actualHead, phase) {
+              if (actualHead !== expectedHead) {
+                throw new Error(
+                  `PR head changed ${phase}: expected ${expectedHead}, found ${actualHead}. `
+                    + 'This run is stale; wait for the check triggered by the latest push.'
+                );
+              }
+            }
+
             try {
               if (!context.payload.pull_request) {
                 throw new Error(`No pull request found in ${context.eventName} payload.`);
               }
 
               const pullNumber = context.payload.pull_request.number;
+              const expectedHead = context.payload.pull_request.head?.sha;
+
+              if (!expectedHead) {
+                throw new Error(`Event payload does not contain a PR head SHA.`);
+              }
+
               const { data: pr } = await github.rest.pulls.get({
                 ...context.repo,
                 pull_number: pullNumber,
               });
+
+              assertHeadUnchanged(expectedHead, pr.head.sha, 'before evaluation');
+
               const authorLogin = pr.user.login;
               const authorPermission = await getPermission(authorLogin);
               const requiredApprovals = hasWrite(authorPermission) ? 1 : 2;
@@ -92,7 +110,7 @@ jobs:
                   continue;
                 }
 
-                if (review.commit_id !== pr.head.sha) {
+                if (review.commit_id !== expectedHead) {
                   continue;
                 }
 
@@ -110,12 +128,19 @@ jobs:
                 ['Required writer approvals', String(requiredApprovals)],
                 ['Current writer approvals', String(approvals.length)],
                 ['Eligible reviewers', approvals.join(', ') || 'None'],
-                ['Current head', pr.head.sha],
+                ['Evaluated head', expectedHead],
               ];
 
               if (approvals.length < requiredApprovals) {
                 failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
               }
+
+              const { data: finalPr } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: pullNumber,
+              });
+
+              assertHeadUnchanged(expectedHead, finalPr.head.sha, 'during evaluation');
             } catch (error) {
               failure = `Approval-policy API or configuration error: ${error.message}`;
               rows = [['Result', failure]];
@@ -133,7 +158,7 @@ jobs:
                 ])
                 .write();
             } catch (error) {
-              failure ||= `Could not write the required review summary: ${error.message}`;
+              core.warning(`Could not write the required review summary: ${error.message}`);
             }
 
             if (failure) {
