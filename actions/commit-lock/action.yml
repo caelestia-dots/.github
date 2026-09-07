@@ -1,0 +1,29 @@
+name: Commit flake.lock
+description: Commit and push flake.lock, if it changed
+
+inputs:
+  token:
+    description: App token from the nix-update action
+    required: true
+  message:
+    description: Commit message
+    required: false
+    default: "chore(nix): update flake inputs [CI]"
+
+runs:
+  using: composite
+
+  steps:
+    - name: Check for changes
+      id: check
+      shell: bash
+      run: echo modified=$(git diff --exit-code flake.lock &>/dev/null && echo 'false' || echo 'true') >> $GITHUB_OUTPUT
+
+    - name: Commit and push changes
+      if: steps.check.outputs.modified == 'true'
+      uses: EndBug/add-and-commit@v11
+      with:
+        github_token: ${{ inputs.token }}
+        add: flake.lock
+        default_author: github_actions
+        message: ${{ inputs.message }}
