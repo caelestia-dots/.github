@@ -15,11 +15,11 @@ inputs:
   commit-add:
     description: Paths to commit at the end of the job, one per line; nothing is committed if unset
     required: false
-    default: ""
+    default: "flake.lock"
   commit-message:
     description: Commit message, required if `commit-add` is set
     required: false
-    default: ""
+    default: "chore(nix): update flake inputs [CI]"
 
 outputs:
   token:
