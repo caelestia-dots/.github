@@ -8,7 +8,6 @@ permissions:
 
 jobs:
   check-pr-approvals:
-    name: check-pr-approvals
     runs-on: ubuntu-latest
 
     steps:
@@ -70,69 +69,91 @@ jobs:
 
               const authorLogin = pr.user.login;
               const authorPermission = await getPermission(authorLogin);
-              const requiredApprovals = hasWrite(authorPermission) ? 1 : 2;
-              const reviews = await github.paginate(
-                github.rest.pulls.listReviews,
-                { ...context.repo, pull_number: pullNumber, per_page: 100 },
-              );
-              const latestDecisive = new Map();
+              const authorHasWrite = hasWrite(authorPermission);
+              if (authorPermission === 'admin') {
+                rows = [
+                  ['Author', authorLogin],
+                  ['Author permission', authorPermission],
+                  ['Workflow requirement', 'None'],
+                  ['Reason', 'Repository administrators are exempt'],
+                  ['Evaluated head', expectedHead],
+                ];
 
-              for (const review of reviews) {
-                const login = review.user?.login;
-                const normalizedLogin = login?.toLowerCase();
-                const state = review.state?.toUpperCase();
+              } else if (authorHasWrite) {
+                rows = [
+                  ['Author', authorLogin],
+                  ['Author permission', authorPermission],
+                  ['Workflow requirement', 'None'],
+                  ['Reason', 'The repository ruleset enforces the required single approval'],
+                  ['Evaluated head', expectedHead],
+                ];
+              } else {
+                const reviews = await github.paginate(
+                  github.rest.pulls.listReviews,
+                  { ...context.repo, pull_number: pullNumber, per_page: 100 },
+                );
+                const latestDecisive = new Map();
 
-                if (!login || normalizedLogin === authorLogin.toLowerCase()) {
-                  continue;
+                for (const review of reviews) {
+                  const login = review.user?.login;
+                  const normalizedLogin = login?.toLowerCase();
+                  const state = review.state?.toUpperCase();
+
+                  if (!login || normalizedLogin === authorLogin.toLowerCase()) {
+                    continue;
+                  }
+
+                  if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) {
+                    continue;
+                  }
+
+                  const previous = latestDecisive.get(normalizedLogin);
+                  const submitted = Date.parse(review.submitted_at || '') || 0;
+                  const previousSubmitted = Date.parse(previous?.submitted_at || '') || 0;
+
+                  if (
+                    !previous
+                      || submitted > previousSubmitted
+                      || (submitted === previousSubmitted && review.id > previous.id)
+                  ) {
+                    latestDecisive.set(normalizedLogin, review);
+                  }
                 }
 
-                if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) {
-                  continue;
+                const approvals = [];
+
+                for (const review of latestDecisive.values()) {
+                  if (review.state?.toUpperCase() !== 'APPROVED') {
+                    continue;
+                  }
+
+                  if (review.commit_id !== expectedHead) {
+                    continue;
+                  }
+
+                  const permission = await getPermission(review.user.login);
+
+                  if (hasWrite(permission)) {
+                    approvals.push(review.user.login);
+                  }
                 }
 
-                const previous = latestDecisive.get(normalizedLogin);
-                const submitted = Date.parse(review.submitted_at || '') || 0;
-                const previousSubmitted = Date.parse(previous?.submitted_at || '') || 0;
+                approvals.sort((a, b) => a.localeCompare(b));
+              
+                const requiredApprovals = 2;
 
-                if (
-                  !previous
-                    || submitted > previousSubmitted
-                    || (submitted === previousSubmitted && review.id > previous.id)
-                ) {
-                  latestDecisive.set(normalizedLogin, review);
+                rows = [
+                  ['Author', authorLogin],
+                  ['Author permission', authorPermission],
+                  ['Required writer approvals', String(requiredApprovals)],
+                  ['Current writer approvals', String(approvals.length)],
+                  ['Eligible reviewers', approvals.join(', ') || 'None'],
+                  ['Evaluated head', expectedHead],
+                ];
+
+                if (approvals.length < requiredApprovals) {
+                  failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
                 }
-              }
-
-              const approvals = [];
-
-              for (const review of latestDecisive.values()) {
-                if (review.state?.toUpperCase() !== 'APPROVED') {
-                  continue;
-                }
-
-                if (review.commit_id !== expectedHead) {
-                  continue;
-                }
-
-                const permission = await getPermission(review.user.login);
-
-                if (hasWrite(permission)) {
-                  approvals.push(review.user.login);
-                }
-              }
-
-              approvals.sort((a, b) => a.localeCompare(b));
-              rows = [
-                ['Author', authorLogin],
-                ['Author permission', authorPermission],
-                ['Required writer approvals', String(requiredApprovals)],
-                ['Current writer approvals', String(approvals.length)],
-                ['Eligible reviewers', approvals.join(', ') || 'None'],
-                ['Evaluated head', expectedHead],
-              ];
-
-              if (approvals.length < requiredApprovals) {
-                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
               }
 
               const { data: finalPr } = await github.rest.pulls.get({
@@ -142,7 +163,7 @@ jobs:
 
               assertHeadUnchanged(expectedHead, finalPr.head.sha, 'during evaluation');
             } catch (error) {
-              failure = `Approval-policy API or configuration error: ${error.message}`;
+              failure = `Approval-policy evaluation error: ${error.message}`;
               rows = [['Result', failure]];
             }
 
@@ -158,7 +179,7 @@ jobs:
                 ])
                 .write();
             } catch (error) {
-              core.warning(`Could not write the required review summary: ${error.message}`);
+              core.warning(`Could not write the review-policy summary: ${error.message}`);
             }
 
             if (failure) {
