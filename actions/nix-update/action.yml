@@ -8,8 +8,8 @@ inputs:
   private-key:
     description: Private key of the GitHub app used to check out and push
     required: true
-  build-args:
-    description: Extra arguments to pass to `nix build`
+  package:
+    description: Flake package to build
     required: false
     default: ""
 
@@ -69,4 +69,4 @@ runs:
 
     - name: Attempt to build flake
       shell: bash
-      run: nix build ${{ inputs.build-args }}
+      run: nix build ${{ inputs.package != '' && format('.#{0}', inputs.package) || '' }}
