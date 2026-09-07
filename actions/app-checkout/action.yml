@@ -1,0 +1,45 @@
+name: Checkout as app
+description: Generate a GitHub app token and check out the repository with it, optionally committing at the end of the job
+
+inputs:
+  client-id:
+    description: Client ID of the GitHub app used to check out and push
+    required: true
+  private-key:
+    description: Private key of the GitHub app used to check out and push
+    required: true
+  commit-add:
+    description: Paths to commit at the end of the job, one per line; nothing is committed if unset
+    required: false
+    default: ""
+  commit-message:
+    description: Commit message, required if `commit-add` is set
+    required: false
+    default: ""
+
+outputs:
+  token:
+    description: App token, in case a step needs to authenticate as the app
+    value: ${{ steps.app-token.outputs.token }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Generate app token
+      id: app-token
+      uses: actions/create-github-app-token@v3
+      with:
+        client-id: ${{ inputs.client-id }}
+        private-key: ${{ inputs.private-key }}
+
+    - uses: actions/checkout@v7
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+
+    - name: Commit and push changes
+      if: inputs.commit-add != ''
+      uses: caelestia-dots/.github/actions/app-checkout/commit@main
+      with:
+        add: ${{ inputs.commit-add }}
+        message: ${{ inputs.commit-message }}

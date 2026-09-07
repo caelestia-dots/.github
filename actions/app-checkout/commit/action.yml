@@ -1,0 +1,16 @@
+name: Commit and push
+description: Commit and push changes as the app at the end of the job, if the job succeeded and there are any
+
+inputs:
+  add:
+    description: Paths to stage, one per line; accepts any git pathspec
+    required: true
+  message:
+    description: Commit message
+    required: true
+
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: success()

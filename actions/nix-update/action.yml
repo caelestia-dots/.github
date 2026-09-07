@@ -1,5 +1,5 @@
 name: Update flake inputs
-description: Generate an app token, check out, install Nix, update the flake inputs and build it
+description: Update flake inputs and optionally commit the lock at the end of the job
 
 inputs:
   client-id:
@@ -12,26 +12,32 @@ inputs:
     description: Flake package to build
     required: false
     default: ""
+  commit-add:
+    description: Paths to commit at the end of the job, one per line; nothing is committed if unset
+    required: false
+    default: ""
+  commit-message:
+    description: Commit message, required if `commit-add` is set
+    required: false
+    default: ""
 
 outputs:
   token:
-    description: App token, for passing to the commit-lock action
-    value: ${{ steps.app-token.outputs.token }}
+    description: App token, in case a step needs to authenticate as the app
+    value: ${{ steps.checkout.outputs.token }}
 
 runs:
   using: composite
 
   steps:
-    - name: Generate app token
-      id: app-token
-      uses: actions/create-github-app-token@v3
+    - name: Checkout as app
+      id: checkout
+      uses: caelestia-dots/.github/actions/app-checkout@main
       with:
         client-id: ${{ inputs.client-id }}
         private-key: ${{ inputs.private-key }}
-
-    - uses: actions/checkout@v7
-      with:
-        token: ${{ steps.app-token.outputs.token }}
+        commit-add: ${{ inputs.commit-add }}
+        commit-message: ${{ inputs.commit-message }}
 
     - name: Install Nix
       uses: nixbuild/nix-quick-install-action@v34
