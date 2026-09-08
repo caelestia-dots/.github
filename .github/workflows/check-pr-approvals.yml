@@ -1,0 +1,181 @@
+name: Reusable PR approval check
+
+on:
+  workflow_call:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check-pr-approvals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check required maintainer approvals
+        uses: actions/github-script@v9
+        with:
+          script: |
+            let rows = [];
+            let failure = null;
+
+            function hasWrite(permission) {
+              return ['write', 'maintain', 'admin'].includes(permission);
+            }
+
+            function requiredApprovalsFor(permission) {
+              if (permission === 'admin') {
+                return 0;
+              }
+
+              return hasWrite(permission) ? 1 : 2;
+            }
+
+            async function getPermission(login) {
+              try {
+                const { data } = await github.request(
+                  'GET /repos/{owner}/{repo}/collaborators/{username}/permission',
+                  { ...context.repo, username: login },
+                );
+
+                return data.permission;
+              } catch (error) {
+                if (error.status === 404) {
+                  return 'none';
+                }
+
+                throw error;
+              }
+            }
+
+            function assertHeadUnchanged(expectedHead, actualHead, phase) {
+              if (actualHead !== expectedHead) {
+                throw new Error(
+                  `PR head changed ${phase}: expected ${expectedHead}, found ${actualHead}. `
+                    + 'This run is stale; wait for the check triggered by the latest push.'
+                );
+              }
+            }
+
+            try {
+              if (!context.payload.pull_request) {
+                throw new Error(`No pull request found in ${context.eventName} payload.`);
+              }
+
+              const pullNumber = context.payload.pull_request.number;
+              const expectedHead = context.payload.pull_request.head?.sha;
+
+              if (!expectedHead) {
+                throw new Error(`Event payload does not contain a PR head SHA.`);
+              }
+
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: pullNumber,
+              });
+
+              assertHeadUnchanged(expectedHead, pr.head.sha, 'before evaluation');
+
+              const authorLogin = pr.user.login;
+              const authorPermission = await getPermission(authorLogin);
+              const requiredApprovals = requiredApprovalsFor(authorPermission);
+              const approvals = [];
+
+              if (requiredApprovals > 0) {
+                const reviews = await github.paginate(
+                  github.rest.pulls.listReviews,
+                  { ...context.repo, pull_number: pullNumber, per_page: 100 },
+                );
+                const latestDecisive = new Map();
+
+                for (const review of reviews) {
+                  const login = review.user?.login;
+                  const normalizedLogin = login?.toLowerCase();
+                  const state = review.state?.toUpperCase();
+
+                  if (!login || normalizedLogin === authorLogin.toLowerCase()) {
+                    continue;
+                  }
+
+                  if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(state)) {
+                    continue;
+                  }
+
+                  const previous = latestDecisive.get(normalizedLogin);
+                  const submitted = Date.parse(review.submitted_at || '') || 0;
+                  const previousSubmitted = Date.parse(previous?.submitted_at || '') || 0;
+
+                  if (
+                    !previous
+                      || submitted > previousSubmitted
+                      || (submitted === previousSubmitted && review.id > previous.id)
+                  ) {
+                    latestDecisive.set(normalizedLogin, review);
+                  }
+                }
+
+                for (const review of latestDecisive.values()) {
+                  if (review.state?.toUpperCase() !== 'APPROVED') {
+                    continue;
+                  }
+
+                  if (review.commit_id !== expectedHead) {
+                    continue;
+                  }
+
+                  const permission = await getPermission(review.user.login);
+
+                  if (hasWrite(permission)) {
+                    approvals.push(review.user.login);
+                  }
+                }
+              }
+
+              approvals.sort((a, b) => a.localeCompare(b));
+              rows = [
+                ['Author', authorLogin],
+                ['Author permission', authorPermission],
+                ['Required maintainer approvals', String(requiredApprovals)],
+                [
+                  'Current maintainer approvals',
+                  requiredApprovals === 0 ? 'Not evaluated' : String(approvals.length),
+                ],
+                [
+                  'Eligible reviewers',
+                  requiredApprovals === 0 ? 'Not evaluated' : approvals.join(', ') || 'None',
+                ],
+                ['Evaluated head', expectedHead],
+              ];
+
+              if (approvals.length < requiredApprovals) {
+                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
+              }
+
+              const { data: finalPr } = await github.rest.pulls.get({
+                ...context.repo,
+                pull_number: pullNumber,
+              });
+
+              assertHeadUnchanged(expectedHead, finalPr.head.sha, 'during evaluation');
+            } catch (error) {
+              failure = `Approval-policy evaluation error: ${error.message}`;
+              rows = [['Result', failure]];
+            }
+
+            try {
+              await core.summary
+                .addHeading('Review policy')
+                .addTable([
+                  [
+                    { data: 'Property', header: true },
+                    { data: 'Value', header: true },
+                  ],
+                  ...rows,
+                ])
+                .write();
+            } catch (error) {
+              core.warning(`Could not write the review-policy summary: ${error.message}`);
+            }
+
+            if (failure) {
+              core.setFailed(failure);
+            }
