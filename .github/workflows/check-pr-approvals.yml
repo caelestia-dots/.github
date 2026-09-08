@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check required writer approvals
+      - name: Check required maintainer approvals
         uses: actions/github-script@v9
         with:
           script: |
@@ -20,6 +20,14 @@ jobs:
 
             function hasWrite(permission) {
               return ['write', 'maintain', 'admin'].includes(permission);
+            }
+
+            function requiredApprovalsFor(permission) {
+              if (permission === 'admin') {
+                return 0;
+              }
+
+              return hasWrite(permission) ? 1 : 2;
             }
 
             async function getPermission(login) {
@@ -69,25 +77,10 @@ jobs:
 
               const authorLogin = pr.user.login;
               const authorPermission = await getPermission(authorLogin);
-              const authorHasWrite = hasWrite(authorPermission);
-              if (authorPermission === 'admin') {
-                rows = [
-                  ['Author', authorLogin],
-                  ['Author permission', authorPermission],
-                  ['Workflow requirement', 'None'],
-                  ['Reason', 'Repository administrators are exempt'],
-                  ['Evaluated head', expectedHead],
-                ];
+              const requiredApprovals = requiredApprovalsFor(authorPermission);
+              const approvals = [];
 
-              } else if (authorHasWrite) {
-                rows = [
-                  ['Author', authorLogin],
-                  ['Author permission', authorPermission],
-                  ['Workflow requirement', 'None'],
-                  ['Reason', 'The repository ruleset enforces the required single approval'],
-                  ['Evaluated head', expectedHead],
-                ];
-              } else {
+              if (requiredApprovals > 0) {
                 const reviews = await github.paginate(
                   github.rest.pulls.listReviews,
                   { ...context.repo, pull_number: pullNumber, per_page: 100 },
@@ -120,8 +113,6 @@ jobs:
                   }
                 }
 
-                const approvals = [];
-
                 for (const review of latestDecisive.values()) {
                   if (review.state?.toUpperCase() !== 'APPROVED') {
                     continue;
@@ -137,23 +128,26 @@ jobs:
                     approvals.push(review.user.login);
                   }
                 }
+              }
 
-                approvals.sort((a, b) => a.localeCompare(b));
-              
-                const requiredApprovals = 2;
+              approvals.sort((a, b) => a.localeCompare(b));
+              rows = [
+                ['Author', authorLogin],
+                ['Author permission', authorPermission],
+                ['Required maintainer approvals', String(requiredApprovals)],
+                [
+                  'Current maintainer approvals',
+                  requiredApprovals === 0 ? 'Not evaluated' : String(approvals.length),
+                ],
+                [
+                  'Eligible reviewers',
+                  requiredApprovals === 0 ? 'Not evaluated' : approvals.join(', ') || 'None',
+                ],
+                ['Evaluated head', expectedHead],
+              ];
 
-                rows = [
-                  ['Author', authorLogin],
-                  ['Author permission', authorPermission],
-                  ['Required writer approvals', String(requiredApprovals)],
-                  ['Current writer approvals', String(approvals.length)],
-                  ['Eligible reviewers', approvals.join(', ') || 'None'],
-                  ['Evaluated head', expectedHead],
-                ];
-
-                if (approvals.length < requiredApprovals) {
-                  failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
-                }
+              if (approvals.length < requiredApprovals) {
+                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
               }
 
               const { data: finalPr } = await github.rest.pulls.get({
