@@ -128,12 +128,19 @@ jobs:
                   if (hasWrite(permission)) {
                     const weight = permission === 'admin' ? 2 : 1;
                     weightedApprovals += weight;
-                    approvals.push(weight === 2 ? `${review.user.login} (admin×2)` : review.user.login);
+                    approvals.push({
+                      login: review.user.login,
+                      weight,
+                    });
                   }
                 }
               }
 
-              approvals.sort((a, b) => a.localeCompare(b));
+              approvals.sort((a, b) => a.login.localeCompare(b.login));
+              
+              const formattedApprovals = approvals.map(({ login, weight }) =>
+                weight === 2 ? `${login} (adminx2)` : login
+              );
               rows = [
                 ['Author', authorLogin],
                 ['Author permission', authorPermission],
