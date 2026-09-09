@@ -79,6 +79,7 @@ jobs:
               const authorPermission = await getPermission(authorLogin);
               const requiredApprovals = requiredApprovalsFor(authorPermission);
               const approvals = [];
+              let weightedApprovals = 0;
 
               if (requiredApprovals > 0) {
                 const reviews = await github.paginate(
@@ -125,7 +126,9 @@ jobs:
                   const permission = await getPermission(review.user.login);
 
                   if (hasWrite(permission)) {
-                    approvals.push(review.user.login);
+                    const weight = permission === 'admin' ? 2 : 1;
+                    weightedApprovals += weight;
+                    approvals.push(weight === 2 ? `${review.user.login} (admin×2)` : review.user.login);
                   }
                 }
               }
@@ -137,7 +140,7 @@ jobs:
                 ['Required maintainer approvals', String(requiredApprovals)],
                 [
                   'Current maintainer approvals',
-                  requiredApprovals === 0 ? 'Not evaluated' : String(approvals.length),
+                  requiredApprovals === 0 ? 'Not evaluated' : String(weightedApprovals),
                 ],
                 [
                   'Eligible reviewers',
@@ -146,8 +149,8 @@ jobs:
                 ['Evaluated head', expectedHead],
               ];
 
-              if (approvals.length < requiredApprovals) {
-                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${approvals.length}.`;
+              if (weightedApprovals < requiredApprovals) {
+                failure = `Requires ${requiredApprovals} current-head approval(s) from maintainers; currently has ${weightedApprovals}.`;
               }
 
               const { data: finalPr } = await github.rest.pulls.get({
