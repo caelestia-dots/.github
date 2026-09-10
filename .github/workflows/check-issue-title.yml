@@ -1,0 +1,168 @@
+name: Reusable issue title check
+
+on:
+  workflow_call:
+    inputs:
+      prefixes:
+        description: Ordered label-to-prefix mappings encoded as JSON pairs
+        required: true
+        type: string
+
+permissions:
+  issues: write
+
+jobs:
+  check-issue-title:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate and normalize issue title
+        uses: actions/github-script@v9
+        env:
+          ISSUE_TITLE_PREFIXES: ${{ inputs.prefixes }}
+        with:
+          script: |
+            const marker = "<!-- issue-title-check -->";
+            const issueParams = {
+              ...context.repo,
+              issue_number: context.issue.number
+            };
+
+            let rawMappings;
+
+            try {
+              rawMappings = JSON.parse(process.env.ISSUE_TITLE_PREFIXES);
+            } catch (error) {
+              core.setFailed(`Invalid prefix mapping JSON: ${error.message}`);
+              return;
+            }
+
+            const isMapping = pair =>
+              Array.isArray(pair) && pair.length === 2 && pair.every(v => typeof v === "string" && v.trim());
+
+            if (!Array.isArray(rawMappings) || !rawMappings.length || !rawMappings.every(isMapping)) {
+              core.setFailed("Prefix mappings must be a nonempty JSON array of label/prefix pairs.");
+              return;
+            }
+
+            const mappings = rawMappings.map(([label, prefix]) => [label.trim().toLowerCase(), prefix.trim().toUpperCase()]);
+
+            const validTags = new Set(mappings.map(([, prefix]) => prefix));
+            const prefixList = [...validTags].map(tag => `\`[${tag}]\``).join(", ");
+            const prefixExpr = /^\[([^\]]+)\]\s*(.*)$/;
+
+            async function findWarnings() {
+              const comments = await github.paginate(github.rest.issues.listComments, { ...issueParams, per_page: 100 });
+              return comments.filter(comment => comment.user?.login === "github-actions[bot]" && comment.body?.includes(marker));
+            }
+
+            async function deleteWarnings(comments) {
+              for (const { id: comment_id } of comments) {
+                await github.rest.issues.deleteComment({
+                  ...context.repo,
+                  comment_id
+                });
+              }
+            }
+
+            async function synchronizeWarning(message) {
+              try {
+                const body = `${marker}\n\n${message}`;
+                const previous = await findWarnings();
+
+                if (!previous.length) {
+                  await github.rest.issues.createComment({ ...issueParams, body });
+                  return;
+                }
+
+                if (previous[0].body !== body) {
+                  await github.rest.issues.updateComment({
+                    ...context.repo,
+                    comment_id: previous[0].id,
+                    body
+                  });
+                }
+
+                await deleteWarnings(previous.slice(1));
+              } catch (error) {
+                core.warning(`Could not synchronize the issue title warning: ${error.message}`);
+              }
+            }
+
+            async function clearWarnings() {
+              try {
+                await deleteWarnings(await findWarnings());
+              } catch (error) {
+                core.warning(`Could not clear the issue title warning: ${error.message}`);
+              }
+            }
+
+            async function writeSummary(message) {
+              try {
+                await core.summary.addHeading("Issue title policy").addRaw(message).write();
+              } catch (error) {
+                core.warning(`Could not write the issue title summary: ${error.message}`);
+              }
+            }
+
+            async function fail(message) {
+              await synchronizeWarning(message);
+              await writeSummary(message);
+              core.setFailed(message);
+            }
+
+            async function succeed(message) {
+              await clearWarnings();
+              await writeSummary(message);
+            }
+
+            async function updateTitle(issue, newTitle) {
+              if (newTitle !== issue.title) {
+                await github.rest.issues.update({ ...issueParams, title: newTitle });
+                core.notice(`Updated issue title to "${newTitle}".`);
+              }
+
+              await succeed(`The issue title is valid: \`${newTitle}\`.`);
+            }
+
+            const { data: issue } = await github.rest.issues.get(issueParams);
+            const title = issue.title.trim();
+            const labels = new Set(issue.labels.map(label => (label?.name ?? label).toLowerCase()));
+            const match = prefixExpr.exec(title);
+
+            let tag;
+            let description;
+
+            if (match) {
+              tag = match[1].toUpperCase();
+
+              if (!validTags.has(tag)) {
+                await fail(`The issue title has an unrecognized prefix. Use one of ${prefixList}.`);
+                return;
+              }
+
+              description = match[2].trim();
+            } else {
+              tag = mappings.find(([label]) => labels.has(label))?.[1];
+
+              if (!tag) {
+                await fail(
+                  `The issue has no recognized title prefix or label. ` +
+                    `Start the title with one of ${prefixList}, and include a description.`
+                );
+                return;
+              }
+
+              description = title;
+            }
+
+            const prefix = `[${tag}]`;
+
+            if (!description) {
+              await fail(
+                `The issue title needs a description after \`${prefix}\` ` + `(for example, \`${prefix} <description>\`).`
+              );
+              return;
+            }
+
+            await updateTitle(issue, `${prefix} ${description}`);
