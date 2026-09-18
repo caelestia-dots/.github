@@ -13,7 +13,6 @@ permissions:
 
 jobs:
   check-issue-title:
-    name: Check issue title
     runs-on: ubuntu-latest
 
     steps:
