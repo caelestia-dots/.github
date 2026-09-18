@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   check-issue-title:
+    name: Check issue title
     runs-on: ubuntu-latest
 
     steps:
@@ -116,18 +117,10 @@ jobs:
               await writeSummary(message);
             }
 
-            async function updateTitle(issue, newTitle) {
-              if (newTitle !== issue.title) {
-                await github.rest.issues.update({ ...issueParams, title: newTitle });
-                core.notice(`Updated issue title to "${newTitle}".`);
-              }
-
-              await succeed(`The issue title is valid: \`${newTitle}\`.`);
-            }
-
             const { data: issue } = await github.rest.issues.get(issueParams);
             const title = issue.title.trim();
             const labels = new Set(issue.labels.map(label => (label?.name ?? label).toLowerCase()));
+            const labelTag = mappings.find(([label]) => labels.has(label))?.[1];
             const match = prefixExpr.exec(title);
 
             let tag;
@@ -143,7 +136,7 @@ jobs:
 
               description = match[2].trim();
             } else {
-              tag = mappings.find(([label]) => labels.has(label))?.[1];
+              tag = labelTag;
 
               if (!tag) {
                 await fail(
@@ -156,13 +149,21 @@ jobs:
               description = title;
             }
 
-            const prefix = `[${tag}]`;
-
             if (!description) {
+              const prefix = `[${tag}]`;
               await fail(
-                `The issue title needs a description after \`${prefix}\` ` + `(for example, \`${prefix} <description>\`).`
+                `The issue title needs a description after \`${prefix}\` (for example, \`${prefix} <description>\`).`
               );
               return;
             }
 
-            await updateTitle(issue, `${prefix} ${description}`);
+            const newTitle = `[${labelTag ?? tag}] ${description}`;
+            if (newTitle !== issue.title) {
+              await github.rest.issues.update({
+                ...issueParams,
+                title: newTitle
+              });
+              core.notice(`Updated issue title to "${newTitle}".`);
+            }
+
+            await succeed(`The issue title is valid: \`${newTitle}\`.`);
