@@ -1,0 +1,183 @@
+name: Reusable PR title check
+
+on:
+  workflow_call:
+    inputs:
+      scope_file:
+        description: Optional file defining allowed scopes (line-separated)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-pr-title:
+    runs-on: ubuntu-latest
+    env:
+      PR_TYPES: |
+        build
+        chore
+        ci
+        docs
+        feat
+        fix
+        perf
+        refactor
+        revert
+        style
+        test
+
+    steps:
+      - name: Check out trusted scope configuration
+        if: ${{ inputs.scope_file }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy-base
+          persist-credentials: false
+          sparse-checkout: ${{ inputs.scope_file }}
+          sparse-checkout-cone-mode: false
+
+      - name: Load allowed scopes
+        if: ${{ inputs.scope_file }}
+        id: scopes
+        shell: bash
+        env:
+          SCOPE_FILE: ${{ inputs.scope_file }}
+        run: |
+          set -euo pipefail
+          scope_path="policy-base/$SCOPE_FILE"
+
+          if [[ ! -f "$scope_path" ]]; then
+            echo "::error::Required scope file '$SCOPE_FILE' is missing from the PR base commit."
+            exit 1
+          fi
+
+          declare -A seen=()
+          scopes=()
+
+          fail() {
+            echo "::error file=$SCOPE_FILE::$1"
+            exit 1
+          }
+
+          while IFS= read -r scope || [[ -n "$scope" ]]; do
+            [[ -z "$scope" ]] && continue
+            [[ ! "$scope" =~ ^[a-z0-9-]+$ ]] && fail "Invalid scope '$scope'; must match '[a-z0-9-]+'."
+            [[ -n "${seen[$scope]:-}" ]] && fail "Duplicate scope '$scope'."
+
+            seen[$scope]=1
+            scopes+=("$scope")
+          done < "$scope_path"
+
+          [[ "${#scopes[@]}" == 0 ]] && fail "The scope file must contain at least one scope."
+
+          {
+            echo 'scopes<<EOF'
+            printf '%s\n' "${scopes[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sync title labels
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const issueParams = {
+              ...context.repo,
+              issue_number: context.payload.pull_request.number,
+            };
+
+            // Event payloads are stale on reruns; re-fetch the PR data.
+            const { data: { labels, state, title } } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: issueParams.issue_number,
+            });
+            if (state !== 'open') return;
+
+            const types = new Set(process.env.PR_TYPES.trim().split(/\s+/));
+            const managed = new Set([...types, 'breaking']);
+            const desired = new Set();
+
+            const header = /^([a-z]+)(?:\([^)]*\))?!?:/.exec(title);
+            if (header && types.has(header[1])) desired.add(header[1]);
+
+            // Preserve breaking detection, even for unknown types.
+            if (/^[a-zA-Z]+(?:\([^)]*\))?!:/.test(title)) desired.add('breaking');
+
+            const current = new Set(labels.map(label => label.name));
+            const additions = [...desired].filter(name => !current.has(name));
+            const removals = [...current].filter(name => managed.has(name) && !desired.has(name));
+
+            // Add/remove labels rather than replacing the entire set to avoid overwriting external changes.
+            for (const name of removals) {
+              try {
+                await github.rest.issues.removeLabel({ ...issueParams, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+
+            if (additions.length) {
+              await github.rest.issues.addLabels({ ...issueParams, labels: additions });
+            }
+
+      - name: Validate PR title
+        if: ${{ !cancelled() && (inputs.scope_file == '' || steps.scopes.outcome == 'success') }}
+        id: validate
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: ${{ env.PR_TYPES }}
+          scopes: ${{ steps.scopes.outputs.scopes }}
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: The subject must be nonempty and must not start with an uppercase character.
+
+      - name: Sync validation comment
+        if: ${{ !cancelled() && contains(fromJSON('["success", "failure"]'), steps.validate.outcome) }}
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: pr-title-check
+          delete: ${{ steps.validate.outcome == 'success' }}
+          skip_unchanged: true
+          message: |
+            ${{ steps.validate.outputs.error_message || 'The pull request title does not follow the title policy.' }}
+
+            Use a Conventional Commit title such as `feat(scope): add a capability`.
+
+      - name: Write validation summary
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v9
+        env:
+          VALIDATION_ERROR: ${{ steps.validate.outputs.error_message }}
+          VALIDATION_OUTCOME: ${{ steps.validate.outcome }}
+          SCOPE_OUTCOME: ${{ steps.scopes.outcome }}
+        with:
+          script: |
+            try {
+              const outcome = process.env.VALIDATION_OUTCOME;
+              const scopeOutcome = process.env.SCOPE_OUTCOME;
+              let status = 'Title validation did not run.';
+
+              if (outcome === 'success') {
+                status = 'The pull request title is valid.';
+              } else if (outcome === 'failure') {
+                status = process.env.VALIDATION_ERROR?.trim() || 'The pull request title is invalid.';
+              } else if (scopeOutcome === 'failure') {
+                status = 'The repository scope configuration is invalid.';
+              }
+
+              await core.summary
+                .addHeading('PR title policy')
+                .addRaw(status)
+                .write();
+            } catch (error) {
+              core.warning(`Could not write the PR-title summary: ${error.message}`);
+            }
