@@ -144,14 +144,14 @@ jobs:
               rows = [
                 ['Author', authorLogin],
                 ['Author permission', authorPermission],
-                ['Required maintainer approvals', String(requiredApprovals)],
+                ['Required weighted approvals', String(requiredApprovals)],
                 [
-                  'Current maintainer approvals',
+                  'Current weighted approvals',
                   requiredApprovals === 0 ? 'Not evaluated' : String(weightedApprovals),
                 ],
                 [
                   'Eligible reviewers',
-                  requiredApprovals === 0 ? 'Not evaluated' : approvals.join(', ') || 'None',
+                  requiredApprovals === 0 ? 'Not evaluated' : formattedApprovals.join(', ') || 'None',
                 ],
                 ['Evaluated head', expectedHead],
               ];
