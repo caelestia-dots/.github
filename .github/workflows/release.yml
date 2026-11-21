@@ -1,0 +1,45 @@
+name: Create release
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: The name of the package
+        required: true
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    env:
+      RELEASE_NAME: caelestia-${{ inputs.package }}-${{ github.ref_name }}
+      RELEASE_LATEST: caelestia-${{ inputs.package }}-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Build release archive
+        run: |
+          mkdir -p ".release/$RELEASE_NAME"
+          rsync -av --exclude={'.*',nix,flake.lock,flake.nix} . ".release/$RELEASE_NAME"
+          echo "$GITHUB_SHA" > ".release/$RELEASE_NAME/REVISION"
+          tar -C .release -czf "$RELEASE_NAME.tar.gz" "$RELEASE_NAME"
+          cp "$RELEASE_NAME.tar.gz" "$RELEASE_LATEST.tar.gz"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ${{ env.RELEASE_NAME }}.tar.gz
+            ${{ env.RELEASE_LATEST }}.tar.gz
+          generate_release_notes: true
+
+      - name: Update stable branch
+        run: |
+          git branch -f stable "$GITHUB_SHA"
+          git push origin stable --force
