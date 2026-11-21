@@ -37,6 +37,7 @@ jobs:
           files: |
             ${{ env.RELEASE_NAME }}.tar.gz
             ${{ env.RELEASE_LATEST }}.tar.gz
+          fail_on_unmatched_files: true
           generate_release_notes: true
 
       - name: Update stable branch
